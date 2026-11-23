@@ -1,0 +1,192 @@
+---
+title: "Math 158 Final Project: Model Diagnostics"
+author: "Cooper Berry, Ian Palmer, Laila Stipanov"
+date: today
+format:
+  pdf:
+    toc: false
+    number-sections: false
+    geometry: margin=1in
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+Before using the initial model for inference, we check the standard linear model assumptions: constant variance, normality of the errors, and unusual observations. We also check collinearity and whether the response needs a transformation.
+
+```{r}
+#| label: data-prep
+#| code-fold: true
+#| code-summary: "Data preparation (same as preliminary analysis)"
+#| echo: false
+library(dplyr)
+library(tidyr)
+library(faraway)
+
+raw <- read.csv("wdi_2019.csv")
+long <- raw[!is.na(raw$Series.Code) & nzchar(trimws(raw$Series.Code)), ]
+long$value <- as.numeric(na_if(trimws(long$X2019..YR2019.), ".."))
+
+indicator_names <- c(
+  "Life expectancy at birth, total (years)" = "life_expectancy",
+  "GDP per capita, PPP (constant 2021 international $)" = "gdp",
+  "People using at least basic sanitation services (% of population)" = "sanitation",
+  "Current health expenditure per capita, PPP (current international $)" = "health_expenditure",
+  "People using at least basic drinking water services (% of population)" = "drinking_water",
+  "Immunization, measles (% of children ages 12-23 months)" = "measles_immunization",
+  "Prevalence of undernourishment (% of population)" = "undernourishment"
+)
+long$variable <- unname(indicator_names[long$Series.Name])
+long <- long[!is.na(long$variable),
+             c("Country.Name", "Country.Code", "variable", "value")]
+
+wdi <- as.data.frame(pivot_wider(long, names_from = variable, values_from = value))
+rownames(wdi) <- wdi$Country.Name
+wdi <- wdi[!wdi$Country.Code %in% c("EMU", "NAC", "SAS"), ]
+
+preds <- c("gdp", "health_expenditure", "sanitation", "drinking_water",
+           "measles_immunization", "undernourishment")
+wdi_cc <- na.omit(wdi[, c("life_expectancy", preds)])
+
+set.seed(47)
+test_idx <- sample(nrow(wdi_cc), ceiling(0.05 * nrow(wdi_cc)))
+test  <- wdi_cc[test_idx, ]
+train <- wdi_cc[-test_idx, ]
+
+lmod <- lm(life_expectancy ~ undernourishment + measles_immunization +
+             drinking_water + health_expenditure + sanitation + gdp,
+           data = train)
+n <- nobs(lmod)
+p <- length(coef(lmod))
+```
+
+## 1. Residuals vs. fitted values
+
+This is the main check for both **linearity** (residuals centered on 0 everywhere) and **constant variance** (an even band of residuals).
+
+```{r}
+#| label: resid-fitted
+plot(fitted(lmod), residuals(lmod), xlab = "Fitted life expectancy",
+     ylab = "Residuals", main = "Residuals vs Fitted", pch = 20, col = "gray40")
+abline(h = 0, col = "red")
+big <- abs(rstandard(lmod)) > 2.5
+text(fitted(lmod)[big], residuals(lmod)[big], names(which(big)), pos = 4, cex = 0.7)
+
+# does residual size change with the fitted value?
+summary(lm(sqrt(abs(residuals(lmod))) ~ fitted(lmod)))$coefficients
+```
+
+**Interpretation:** Residuals are centered around 0 with no clear curve. The spread is somewhat wider for countries with low fitted life expectancy, and the formal test is borderline (p $\approx$ 0.05). Much of this comes from one point: the Central African Republic, with a residual of about −22 years. Without it the test is not close to significant (p $\approx$ 0.44; see Section 4), so the constant variance assumption is reasonable.
+
+## 2. Normality of the errors
+
+Normal errors are needed for t-tests, F-tests, and confidence/prediction intervals to be correct.
+
+```{r}
+#| label: normality
+qqnorm(residuals(lmod), main = "Normal Q-Q Plot of Residuals", pch = 20)
+qqline(residuals(lmod), col = "red")
+shapiro.test(residuals(lmod))
+```
+
+**Interpretation:** The points follow the line closely except for one extreme point in the lower tail (the Central African Republic). The Shapiro–Wilk test rejects normality (p $\approx$ $6 \times 10^{-9}$), but this is driven by that single point. Without it, normality is not rejected (p $\approx$ 0.09).
+
+## 3. Unusual observations
+
+We check for points with **high leverage** (unusual predictor values, $h_i$ > 2p/n), **outliers** (|standardized residual| > 2), and **influential points** (Cook's distance > 4/n), using the cutoffs from lecture.
+
+```{r}
+#| label: unusual
+c(leverage_cutoff = 2 * p / n, cooks_cutoff = 4 / n)
+
+unusual <- data.frame(leverage  = hatvalues(lmod),
+                      std_resid = rstandard(lmod),
+                      cooks_d   = cooks.distance(lmod))
+
+sum(unusual$leverage > 2 * p / n)        # high-leverage countries
+sum(abs(unusual$std_resid) > 2)          # outliers
+
+# influential countries, largest first
+infl <- unusual[unusual$cooks_d > 4 / n, ]
+round(infl[order(-infl$cooks_d), ], 3)
+
+plot(lmod, which = 5, sub.caption = "")   # Cooks Distance Plot
+```
+
+**Interpretation:**
+
+- **Outliers:** 7 of 149 countries have |standardized residual| > 2, close to the ~5% expected by chance. The exception is the Central African Republic at −6.6, far beyond any other country.
+- **Leverage:** Several countries have high leverage (e.g., Luxembourg and the United States, with very high GDP and health spending), but most have small Cook's distances, so they do not change the fit much.
+- **Influence:** The Central African Republic dominates, with Cook's D = 1.06, about three times the next country. The United States (D = 0.35) is second: it spends far more on health than any other country but has lower life expectancy than the model predicts.
+
+As noted in the EDA, the Central African Republic's value (31.5 years) is likely a data error. World Health Organization estimates about 53 years.
+
+## 4. How much does the Central African Republic change the model?
+
+An influential point is a problem if it changes our conclusions. We refit the model without it and compare.
+
+```{r}
+#| label: no-car
+lmod_noCAR <- update(lmod, data = train[rownames(train) != "Central African Republic", ])
+
+compare <- cbind(summary(lmod)$coefficients[, c(1, 4)],
+                 summary(lmod_noCAR)$coefficients[, c(1, 4)])
+colnames(compare) <- c("Estimate (all)", "p-value (all)",
+                       "Estimate (no CAR)", "p-value (no CAR)")
+signif(compare, 3)
+
+c(R2_all = summary(lmod)$r.squared, R2_noCAR = summary(lmod_noCAR)$r.squared)
+shapiro.test(residuals(lmod_noCAR))
+summary(lm(sqrt(abs(residuals(lmod_noCAR))) ~ fitted(lmod_noCAR)))$coefficients
+```
+
+Removing this one country changes the conclusions:
+
+- R² rises from 0.82 to 0.85.
+- **Drinking water** goes from significant (p $\approx$ 0.02) to clearly not significant (p $\approx$ 0.4).
+- **GDP** goes from borderline (p $\approx$ 0.08) to significant (p $\approx$ 0.02).
+- The **measles** coefficient is cut almost in half, and **sanitation** becomes stronger.
+- The normality and constant-variance problems disappear.
+
+Because one likely-erroneous data point drives these results, we plan to remove the Central African Republic from the final analysis and report this choice.
+
+## 5. Collinearity
+
+The EDA showed strong correlations among predictors (GDP–health expenditure r = 0.92, sanitation–water r = 0.91). Variance inflation factors (VIFs) measure how much collinearity inflates each coefficient's variance. Values above 5–10 are a concern.
+
+```{r}
+#| label: vif
+vif(lmod)
+```
+
+**Interpretation:** GDP, health expenditure, sanitation, and drinking water have VIFs between about 6 and 7, so their standard errors are roughly 2.5 times larger than without collinearity (√7 $\approx$ 2.6). This helps explain why GDP is only borderline significant despite a 0.74 correlation with life expectancy: GDP and health expenditure carry overlapping information. Measles immunization (1.7) and undernourishment (2.6) are not a concern.
+
+## 6. Transforming the response (Box–Cox)
+
+Box–Cox estimates the power transformation of the response ($\lambda$) that best fits the model. If the 95% interval includes $\lambda$ = 1, no transformation is needed.
+
+```{r}
+#| label: boxcox
+bc <- MASS::boxcox(lmod, lambda = seq(0, 6, 0.05))
+bc$x[which.max(bc$y)]                                      # best lambda
+range(bc$x[bc$y > max(bc$y) - qchisq(0.95, 1) / 2])        # 95% interval
+```
+
+**Interpretation:** The best $\lambda$ is about 3.4, with a 95% interval of roughly 2.7 to 4.3, which excludes 1. Without the Central African Republic the interval is roughly 1.5 to 3.8, which still excludes 1. This reflects the left skew of life expectancy (most countries are bunched near the top). However, squaring or cubing life expectancy would make the coefficients hard to interpret, so we will weigh this against interpretability in the final model.
+
+## Summary
+
+The initial model fits well, explaining about 82% of the variation in life expectancy across our 149 training countries. Sanitation and measles immunization are the strongest predictors, drinking water and health expenditure are also significant, GDP is borderline, and undernourishment doesn't add much once the other variables are in the model.
+
+The biggest obstacle is the Central African Republic. Its life expectancy of 31.5 years is likely a data error (the World Health Organization puts it around 53), and it's by far the most influential point in the model. It's the main reason the normality and constant variance checks fail, and removing it changes which predictors are significant. We plan to drop it from the final analysis and explain why.
+
+A few other issues we need to address:
+
+- Missing data cut us from 214 countries to 157, mostly small states and territories, so our results apply best to larger countries.
+- Undernourishment is capped at 2.5% for 56 countries, which likely weakens its estimated effect. Also causes a large amount of missing data cuts, so potentially remove.
+- GDP, health expenditure, sanitation, and drinking water overlap heavily (VIFs around 6 to 7), which inflates their standard errors.
+- GDP and health expenditure have curved relationships with life expectancy, so we'll likely log transform them.
+- Box-Cox suggests transforming life expectancy, but we'll keep it in years since that's much easier to interpret.
+
+Next, we'll refit the model without the Central African Republic and with logged GDP and health expenditure, test whether the public health variables explain more than GDP alone, and compare models using several selection methods before forecasting our 8 held-out countries.

@@ -1,0 +1,220 @@
+---
+title: "Math 158 Final Project: Preliminary Analysis"
+author: "Cooper Berry, Ian Palmer, Laila Stipanov"
+date: today
+format:
+  pdf:
+    toc: false
+    number-sections: false
+    geometry: margin=1in
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(dplyr)
+library(tidyr)
+```
+
+## Data
+
+World Bank World Development Indicators, 2019.
+
+```{r}
+#| label: load-data
+raw <- read.csv("wdi_2019.csv")
+summary(raw)
+```
+
+Remove the footer rows (blank `Series.Code`) and convert the World Bank's `".."` missing-value code to `NA`.
+
+```{r}
+#| label: clean
+# drop footer rows and convert ".." to NA (raw stays untouched)
+long <- raw[!is.na(raw$Series.Code) & 
+              nzchar(trimws(raw$Series.Code)), ]
+long$value <- as.numeric(na_if(trimws(long$X2019..YR2019.), ".."))
+```
+
+Rename the indicators and reshape to one row per country.
+
+```{r}
+#| label: reshape
+indicator_names <- c(
+  "Life expectancy at birth, total (years)" = "life_expectancy",
+  "GDP per capita, PPP (constant 2021 international $)" = "gdp",
+  "People using at least basic sanitation services (% of population)" = "sanitation",
+  "Current health expenditure per capita, PPP (current international $)" = "health_expenditure",
+  "People using at least basic drinking water services (% of population)" = "drinking_water",
+  "Immunization, measles (% of children ages 12-23 months)" = "measles_immunization",
+  "Prevalence of undernourishment (% of population)" = "undernourishment"
+)
+long$variable <- unname(indicator_names[long$Series.Name])
+long <- long[!is.na(long$variable),
+             c("Country.Name", "Country.Code", "variable", "value")]
+
+wdi <- pivot_wider(long, names_from = variable, values_from = value)
+summary(wdi)
+```
+
+### Removing regional aggregates
+
+The World Bank download includes three regional aggregates that are not countries. We remove them.
+
+```{r}
+#| label: drop-aggregates
+wdi <- as.data.frame(wdi)
+rownames(wdi) <- wdi$Country.Name   # label rows by country for later plots/output
+
+wdi$Country.Name[wdi$Country.Code %in% c("EMU", "NAC", "SAS")]
+wdi <- wdi[!wdi$Country.Code %in% c("EMU", "NAC", "SAS"), ]
+nrow(wdi)
+```
+
+This leaves 214 countries.
+
+### Missing data
+
+```{r}
+#| label: missing
+colSums(is.na(wdi))
+sum(complete.cases(wdi))   # countries with all 7 variables
+```
+
+Only 157 countries have all seven variables, and undernourishment accounts for most of the loss (48 missing). The dropped countries are mostly small states and territories (e.g., Monaco, Andorra, Pacific islands), so our results describe larger countries best.
+
+### Sanity checks
+
+Undernourishment below 2.5% is reported as exactly 2.5, so those values are a floor, not a measurement.
+
+```{r}
+#| label: undernourishment-floor
+sum(wdi$undernourishment == 2.5, na.rm = TRUE)
+```
+
+56 countries sit at this floor, about a third of those with data. The variable cannot distinguish among these countries, which may weaken its estimated effect.
+
+
+Countries with the lowest life expectancy, to check for implausible values:
+
+```{r}
+#| label: lowest-le
+head(wdi[order(wdi$life_expectancy),
+         c("life_expectancy", "gdp", "sanitation", "measles_immunization")], 5)
+```
+
+The Central African Republic's 31.5 years is about 21 years below the next-lowest country (Chad, 53.0). World Health Organization estimates its 2019 life expectancy at about 53 years, so this is likely a data error in the World Bank series. We keep it for now and examine its influence in the diagnostics.
+
+## Exploratory Data Analysis
+
+```{r}
+#| label: histograms
+#| fig-width: 9
+#| fig-height: 10
+par(mfrow = c(4, 2))
+hist(wdi$life_expectancy, main = "Life Expectancy", xlab = "Years")
+hist(wdi$undernourishment, main = "Prevalence of Undernourishment",
+     xlab = "Percentage of Population")
+hist(wdi$measles_immunization, main = "Measles Immunization",
+     xlab = "Percentage of children ages 12-23 months")
+hist(wdi$drinking_water, main = "Access to Basic Drinking Water",
+     xlab = "Percentage of Population")
+hist(wdi$health_expenditure, main = "Health Expenditure",
+     xlab = "Expenditure per capita")
+hist(wdi$sanitation, main = "Access to Basic Sanitation",
+     xlab = "Percentage of Population")
+hist(wdi$gdp, main = "GDP", xlab = "GDP per capita")
+par(mfrow = c(1, 1))
+```
+
+Life expectancy is left-skewed (most countries are 65–85 years). GDP and health expenditure are strongly right-skewed, with a few very wealthy countries. Sanitation, drinking water and measles immunization are bunched near 100%.
+
+### Life expectancy vs. each predictor
+
+Red lines are lowess smoothers, which show the shape of each relationship without assuming it is linear.
+
+```{r}
+#| label: scatterplots
+#| fig-width: 10
+#| fig-height: 7
+preds <- c("gdp", "health_expenditure", "sanitation", "drinking_water",
+           "measles_immunization", "undernourishment")
+pred_labels <- c("GDP per capita (PPP $)", "Health expenditure per capita (PPP $)",
+                 "Basic sanitation (%)", "Basic drinking water (%)",
+                 "Measles immunization (%)", "Undernourishment (%)")
+
+par(mfrow = c(2, 3))
+for (i in seq_along(preds)) {
+  x <- wdi[[preds[i]]]
+  ok <- complete.cases(x, wdi$life_expectancy)
+  plot(x, wdi$life_expectancy, xlab = pred_labels[i], ylab = "Life expectancy",
+       pch = 20, col = "gray40")
+  lines(lowess(x[ok], wdi$life_expectancy[ok]), col = "red", lwd = 2)
+}
+par(mfrow = c(1, 1))
+```
+
+
+Every predictor is clearly related to life expectancy. GDP and health expenditure rise steeply at low values and then level off. A straight line would fit them poorly, which suggests a log transformation. Sanitation, drinking water and immunization increase roughly linearly, and undernourishment decreases. The Central African Republic appears as an isolated point at the bottom of every panel.
+
+### GDP and health expenditure on a log scale
+
+```{r}
+#| label: log-scatter
+#| fig-width: 10
+#| fig-height: 4.5
+par(mfrow = c(1, 2))
+plot(life_expectancy ~ log(gdp), data = wdi, pch = 20, col = "gray40",
+     xlab = "log(GDP per capita)", ylab = "Life expectancy")
+plot(life_expectancy ~ log(health_expenditure), data = wdi, pch = 20, col = "gray40",
+     xlab = "log(Health expenditure per capita)", ylab = "Life expectancy")
+par(mfrow = c(1, 1))
+```
+
+On the log scale, both relationships are approximately linear, so we will consider log(GDP) and log(health expenditure) in the model.
+
+
+### Correlations among variables
+
+```{r}
+#| label: correlations
+#| fig-width: 9
+#| fig-height: 9
+vars <- c("life_expectancy", preds)
+round(cor(wdi[, vars], use = "complete.obs"), 2)
+```
+
+All six predictors are strongly correlated with life expectancy (|r| from 0.64 to 0.84, highest for sanitation). They are also strongly correlated with each other: GDP and health expenditure (r = 0.92), and sanitation and drinking water (r = 0.91). We expect collinearity, which we check with VIFs in the diagnostics.
+
+
+### Holding out 5% of countries for forecasting
+
+As required by the project guidelines, we set aside 5% of countries before fitting any model. They will be used only to test forecasts in the final report.
+
+```{r}
+#| label: holdout
+model_vars <- c("life_expectancy", preds)
+wdi_cc <- na.omit(wdi[, model_vars])
+nrow(wdi_cc)
+
+set.seed(47)
+test_idx <- sample(nrow(wdi_cc), ceiling(0.05 * nrow(wdi_cc)))
+test  <- wdi_cc[test_idx, ]
+train <- wdi_cc[-test_idx, ]
+rownames(test)
+```
+
+## Initial Model
+
+```{r}
+#| label: initial-model
+lmod <- lm(life_expectancy ~ undernourishment + measles_immunization +
+             drinking_water + health_expenditure + sanitation + gdp,
+           data = train)
+summary(lmod)
+```
+
+The initial model explains about 82% of the variation in life expectancy across the 149 training countries ($R^2$ = 0.821, adjusted $R^2$ = 0.814), with a residual standard error of 3.6 years. Holding the other predictors constant, a 10 percentage point increase in basic sanitation is associated with about 1.1 more years of life expectancy (p < 0.001), and a 10 point increase in measles immunization with about 1.0 more year (p < 0.001). Drinking water (p = 0.02) and health expenditure (about 0.7 years per additional $1,000 per capita, p = 0.04) are also significant. GDP is only borderline (p = 0.08), likely because it overlaps heavily with health expenditure (r = 0.92). Undernourishment is not significant (p = 0.68).
