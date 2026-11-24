@@ -177,16 +177,16 @@ range(bc$x[bc$y > max(bc$y) - qchisq(0.95, 1) / 2])        # 95% interval
 
 ## Summary
 
-The initial model fits well, explaining about 82% of the variation in life expectancy across our 149 training countries. Sanitation and measles immunization are the strongest predictors, drinking water and health expenditure are also significant, GDP is borderline, and undernourishment doesn't add much once the other variables are in the model.
+The initial model fits well, explaining about 82% of the variation in life expectancy across our 149 training countries. Sanitation and measles immunization are the strongest predictors, drinking water and health expenditure are also significant, GDP is borderline, and undernourishment doesn't add much once the other variables are in the model. The residuals show no clear curvature, suggesting that the linearity assumption is reasonable for our inital model.
 
-The biggest obstacle is the Central African Republic. Its life expectancy of 31.5 years is likely a data error (the World Health Organization puts it around 53), and it's by far the most influential point in the model. It's the main reason the normality and constant variance checks fail, and removing it changes which predictors are significant. We plan to drop it from the final analysis and explain why.
+The biggest obstacle is the Central African Republic. Its life expectancy of 31.5 years is likely a data error (the World Health Organization puts it around 53), and it's by far the most influential point in the model. It's the main reason the normality and constant variance checks fail, and removing it changes which predictors are significant. Removing it increases our R squared from 0.82 to 0.85, making GDP significant, and makes drinking water no longer significant. Both the normality and constant variance tests are also no longer significant. We plan to drop it from the final analysis and explain why.
 
 A few other issues we need to address:
 
 - Missing data cut us from 214 countries to 157, mostly small states and territories, so our results apply best to larger countries.
-- Undernourishment is capped at 2.5% for 56 countries, which likely weakens its estimated effect. Also causes a large amount of missing data cuts, so potentially remove.
-- GDP, health expenditure, sanitation, and drinking water overlap heavily (VIFs around 6 to 7), which inflates their standard errors.
+- Undernourishment is reported at a lower limit of 2.5% for 56 countries, which likely weakens its estimated effect. Also causes a large amount of missing data cuts, so potentially remove.
+- GDP, health expenditure, sanitation, and drinking water overlap heavily (VIFs around 6 to 7), which inflates their standard errors. This makes it harder to determine the individual effects of these predictors
 - GDP and health expenditure have curved relationships with life expectancy, so we'll likely log transform them.
-- Box-Cox suggests transforming life expectancy, but we'll keep it in years since that's much easier to interpret.
+- Box-Cox suggests transforming life expectancy, but we'll keep it in years since that's much easier to interpret. We will reasses whether a response transformation is needed after transforming our predictors
 
-Next, we'll refit the model without the Central African Republic and with logged GDP and health expenditure, test whether the public health variables explain more than GDP alone, and compare models using several selection methods before forecasting our 8 held-out countries.
+Next, we'll refit the model without the Central African Republic and with logged GDP and health expenditure, test whether the public health variables explain more than GDP alone, and compare models using several selection methods before predicting our 8 held-out countries. We will also recheck the model assumptions after making these changes. Since our data is conservational, we can identify associations but cannot establish causation.
